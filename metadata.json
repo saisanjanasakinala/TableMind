@@ -1,0 +1,6 @@
+{
+  "name": "TableMind AI",
+  "description": "AI-powered smart restaurant reservation and management platform featuring real-time availability, conversational AI booking assistant, smart table allocation, and visual floor plan management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
