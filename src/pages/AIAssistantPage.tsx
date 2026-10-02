@@ -14,6 +14,10 @@ import {
   User as UserIcon,
   RotateCcw,
   ArrowRight,
+  MapPin,
+  Star,
+  ChevronRight,
+  Compass,
 } from 'lucide-react';
 import { AIAssistantMessage } from '../types';
 
@@ -26,6 +30,10 @@ export const AIAssistantPage: React.FC = () => {
     bookReservation,
     navigate,
     showToast,
+    userLocation,
+    setBookingDate,
+    setBookingTime,
+    setBookingPartySize,
   } = useApp();
 
   const [inputMessage, setInputMessage] = useState('');
@@ -34,7 +42,7 @@ export const AIAssistantPage: React.FC = () => {
     {
       id: 'msg-welcome',
       role: 'assistant',
-      content: `Welcome! I am TableMind AI, your intelligent reservation concierge. Tell me what you're craving, party size, date, or seating style (e.g. "I need a table for 4 people tomorrow at 7 PM at L'Étoile Brasserie, booth preferred"), and I'll check live table availability and secure the ideal reservation.`,
+      content: `Welcome to TableMind AI! I am your location-aware dining concierge. Ask me for tables by area, city, date, party size, or cuisine (e.g. "Find a table for 4 people tomorrow at 7 PM near Surampalem"), and I'll find suitable restaurants and available tables in real time.`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
@@ -83,11 +91,13 @@ export const AIAssistantPage: React.FC = () => {
       const assistantMsg: AIAssistantMessage = {
         id: `msg-${Date.now()}-ai`,
         role: 'assistant',
-        content: data.replyText || "I've checked our live table availability.",
+        content: data.replyText || "I've checked our live table inventory for your location.",
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         actionableReservation: data.actionableReservation,
+        nearbyRestaurants: data.nearbyRestaurants,
         alternativeSuggestions: data.alternativeSuggestions,
         estimatedWaitMinutes: data.estimatedWaitMinutes,
+        extractedLocation: data.extractedLocation,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
@@ -97,7 +107,7 @@ export const AIAssistantPage: React.FC = () => {
         id: `msg-${Date.now()}-fallback`,
         role: 'assistant',
         content:
-          "I've verified the live table inventory. Let me know which restaurant and time you prefer, or select an open slot from our recommendations.",
+          "I've verified the live table inventory. Let me know which restaurant, location, and time you prefer, or select an open slot from our recommendations.",
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, fallbackMsg]);
@@ -134,11 +144,18 @@ export const AIAssistantPage: React.FC = () => {
     }
   };
 
+  const handleGoToRestaurantBooking = (restaurantId: string, date?: string, time?: string, guests?: number) => {
+    if (date) setBookingDate(date);
+    if (time) setBookingTime(time);
+    if (guests) setBookingPartySize(guests);
+    navigate('booking', restaurantId);
+  };
+
   const samplePrompts = [
-    "I need a table for 4 tomorrow at 7 PM at L'Étoile Brasserie, booth preferred",
-    "Counter seating for 2 tonight at Sakura Omakase",
-    "Find a romantic window table for 2 this weekend around 8 PM",
-    "Check availability at Trattoria Bella Vista for 6 guests",
+    "Find a table for 4 people tomorrow at 7 PM near Surampalem.",
+    "Table for 2 tonight near Downtown San Francisco, booth preferred",
+    "Available dinner tables near Surampalem for tonight",
+    "Find a table for 6 this weekend at 8 PM near Kakinada",
   ];
 
   return (
@@ -266,6 +283,84 @@ export const AIAssistantPage: React.FC = () => {
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         Confirm Booking in 1 Click
                       </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Nearby Suitable Restaurants List */}
+                {msg.nearbyRestaurants && msg.nearbyRestaurants.length > 0 && (
+                  <div className="mt-3.5 space-y-2">
+                    <div className="text-[11px] font-bold text-amber-400 flex items-center gap-1">
+                      <MapPin className="w-3.5 h-3.5 text-amber-400" />
+                      <span>
+                        Suitable Restaurants Found {msg.extractedLocation ? `near ${msg.extractedLocation}` : ''}:
+                      </span>
+                    </div>
+
+                    <div className="space-y-2">
+                      {msg.nearbyRestaurants.map((item) => (
+                        <div
+                          key={item.restaurantId}
+                          className="p-3 rounded-xl bg-stone-950/90 border border-stone-700/80 hover:border-amber-500/50 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md"
+                        >
+                          <div className="flex items-center gap-3">
+                            <img
+                              src={item.heroImage}
+                              alt={item.restaurantName}
+                              className="w-14 h-14 rounded-lg object-cover border border-stone-800 shrink-0"
+                            />
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-bold text-white text-xs">{item.restaurantName}</span>
+                                <span className="px-1.5 py-0.2 rounded bg-stone-800 text-[10px] text-amber-300 font-semibold">
+                                  {item.priceRange}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-stone-400 flex items-center gap-2 mt-0.5">
+                                <span>{item.cuisine}</span>
+                                <span>•</span>
+                                <span className="flex items-center gap-0.5 text-amber-400">
+                                  <Star className="w-2.5 h-2.5 fill-amber-400 text-amber-400" />
+                                  {item.rating}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-stone-500 flex items-center gap-1 mt-0.5">
+                                <MapPin className="w-2.5 h-2.5" />
+                                <span className="truncate max-w-[180px]">{item.address}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 border-t sm:border-t-0 pt-2 sm:pt-0 border-stone-800 shrink-0">
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                item.availableTableCount > 0
+                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                                  : 'bg-amber-500/10 text-amber-300 border border-amber-500/30'
+                              }`}
+                            >
+                              {item.availableTableCount > 0
+                                ? `${item.availableTableCount} tables open`
+                                : 'Waitlist Only'}
+                            </span>
+
+                            <button
+                              onClick={() =>
+                                handleGoToRestaurantBooking(
+                                  item.restaurantId,
+                                  msg.actionableReservation?.date,
+                                  msg.actionableReservation?.time,
+                                  msg.actionableReservation?.guestCount
+                                )
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-[11px] transition-transform hover:scale-[1.02] cursor-pointer flex items-center gap-1 shadow-sm"
+                            >
+                              <span>View Tables</span>
+                              <ChevronRight className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}

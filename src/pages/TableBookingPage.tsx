@@ -15,9 +15,11 @@ import {
   Utensils,
   Layers,
   ArrowRight,
+  Navigation2,
 } from 'lucide-react';
-import { getTodayDateString, getTomorrowDateString } from '../data/mockData';
+import { getTodayDateString, getTomorrowDateString, calculateDistanceKm, formatDistance } from '../data/mockData';
 import { RestaurantTable, SeatingType, SmartAllocationResult, WaitTimePrediction } from '../types';
+import { FindTablesFlowBar } from '../components/FindTablesFlowBar';
 
 export const TableBookingPage: React.FC = () => {
   const {
@@ -30,14 +32,34 @@ export const TableBookingPage: React.FC = () => {
     getAvailableTablesForParty,
     navigate,
     showToast,
+    userLocation,
+    bookingDate,
+    setBookingDate,
+    bookingTime,
+    setBookingTime,
+    bookingPartySize,
+    setBookingPartySize,
   } = useApp();
 
-  // Booking Parameters
-  const [selectedDate, setSelectedDate] = useState(getTodayDateString());
-  const [selectedTime, setSelectedTime] = useState('19:00');
-  const [guestCount, setGuestCount] = useState(2);
+  // Booking Parameters synced with context
+  const [selectedDate, setSelectedDate] = useState(bookingDate || getTodayDateString());
+  const [selectedTime, setSelectedTime] = useState(bookingTime || '19:00');
+  const [guestCount, setGuestCount] = useState(bookingPartySize || 2);
   const [seatingPreference, setSeatingPreference] = useState<SeatingType | 'any'>('any');
   const [specialRequests, setSpecialRequests] = useState('');
+
+  // Keep context synced when inputs change
+  useEffect(() => {
+    setBookingDate(selectedDate);
+  }, [selectedDate, setBookingDate]);
+
+  useEffect(() => {
+    setBookingTime(selectedTime);
+  }, [selectedTime, setBookingTime]);
+
+  useEffect(() => {
+    setBookingPartySize(guestCount);
+  }, [guestCount, setBookingPartySize]);
 
   // Customer Contact
   const [customerName, setCustomerName] = useState(currentUser.name || 'Alex Morgan');
@@ -299,12 +321,12 @@ export const TableBookingPage: React.FC = () => {
     <div className="min-h-screen bg-stone-950 text-stone-100 py-8 px-4 sm:px-6 lg:px-8">
       <div className="max-w-6xl mx-auto">
         {/* Navigation Breadcrumb */}
-        <div className="mb-6 flex items-center justify-between">
+        <div className="mb-4 flex items-center justify-between">
           <button
-            onClick={() => navigate('restaurant-detail', selectedRestaurant.id)}
+            onClick={() => navigate('discovery')}
             className="inline-flex items-center gap-1.5 text-xs text-stone-400 hover:text-white transition-colors cursor-pointer"
           >
-            <ChevronLeft className="w-4 h-4" /> Back to {selectedRestaurant.name}
+            <ChevronLeft className="w-4 h-4" /> Back to Discovery & Nearby Spots
           </button>
 
           <div className="flex items-center gap-2 text-xs text-stone-400">
@@ -312,6 +334,13 @@ export const TableBookingPage: React.FC = () => {
             <span>Guaranteed Zero Double-Bookings</span>
           </div>
         </div>
+
+        {/* Find Tables Flow Progress Bar */}
+        <FindTablesFlowBar
+          currentStep="tables"
+          restaurantName={selectedRestaurant.name}
+          selectedTableNumber={selectedTable?.tableNumber}
+        />
 
         {/* Title & Restaurant Header */}
         <div className="p-6 rounded-2xl bg-stone-900 border border-stone-800 mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -322,15 +351,30 @@ export const TableBookingPage: React.FC = () => {
               className="w-16 h-16 rounded-xl object-cover border border-stone-700 shrink-0"
             />
             <div>
-              <div className="text-xs font-semibold text-amber-400 uppercase tracking-wider">
-                {selectedRestaurant.cuisine} • {selectedRestaurant.priceRange}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-amber-400 uppercase tracking-wider">
+                  {selectedRestaurant.cuisine} • {selectedRestaurant.priceRange}
+                </span>
+                {userLocation && selectedRestaurant.latitude !== undefined && selectedRestaurant.longitude !== undefined && (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-300 px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20">
+                    <Navigation2 className="w-2.5 h-2.5 rotate-45 fill-amber-300" />
+                    {formatDistance(
+                      calculateDistanceKm(
+                        userLocation.latitude,
+                        userLocation.longitude,
+                        selectedRestaurant.latitude,
+                        selectedRestaurant.longitude
+                      )
+                    )} from {userLocation.label.split(',')[0]}
+                  </span>
+                )}
               </div>
               <h1 className="text-2xl font-bold text-white font-display">
                 {selectedRestaurant.name}
               </h1>
               <div className="flex items-center gap-2 text-xs text-stone-400 mt-1">
                 <MapPin className="w-3.5 h-3.5 text-stone-500" />
-                <span>{selectedRestaurant.address}, {selectedRestaurant.neighborhood}</span>
+                <span>{selectedRestaurant.address}, {selectedRestaurant.city}</span>
               </div>
             </div>
           </div>

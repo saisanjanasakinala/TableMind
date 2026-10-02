@@ -1,4 +1,31 @@
-export type UserRole = 'customer' | 'owner' | 'admin';
+export type UserRole =
+  | 'CUSTOMER'
+  | 'RESTAURANT_OWNER'
+  | 'PLATFORM_ADMIN'
+  | 'customer'
+  | 'owner'
+  | 'admin';
+
+export function normalizeRole(role: string | undefined): 'CUSTOMER' | 'RESTAURANT_OWNER' | 'PLATFORM_ADMIN' {
+  if (!role) return 'CUSTOMER';
+  const clean = role.toUpperCase();
+  if (clean === 'RESTAURANT_OWNER' || clean === 'OWNER') return 'RESTAURANT_OWNER';
+  if (clean === 'PLATFORM_ADMIN' || clean === 'ADMIN') return 'PLATFORM_ADMIN';
+  return 'CUSTOMER';
+}
+
+export function getRoleDisplayName(role: string | undefined): string {
+  const norm = normalizeRole(role);
+  switch (norm) {
+    case 'RESTAURANT_OWNER':
+      return 'Restaurant Owner';
+    case 'PLATFORM_ADMIN':
+      return 'Platform Admin';
+    case 'CUSTOMER':
+    default:
+      return 'Customer';
+  }
+}
 
 export interface User {
   id: string;
@@ -8,6 +35,11 @@ export interface User {
   phone?: string;
   avatar?: string;
   restaurantId?: string; // If owner, which restaurant they manage
+  password?: string;
+  createdAt?: string;
+  dietaryPreferences?: string[];
+  seatingPreference?: SeatingType;
+  specialNotes?: string;
 }
 
 export type SeatingType = 'indoor' | 'patio' | 'booth' | 'window' | 'bar' | 'private';
@@ -63,6 +95,18 @@ export interface MenuItem {
   isChefSpecial?: boolean;
 }
 
+export type LocationMode = 'current' | 'manual' | 'preset';
+
+export interface UserLocation {
+  label: string; // e.g. "Hyderabad, Telangana" or "Surampalem, Andhra Pradesh"
+  mode: LocationMode;
+  latitude: number;
+  longitude: number;
+  city?: string;
+  area?: string;
+  state?: string;
+}
+
 export interface Restaurant {
   id: string;
   name: string;
@@ -73,8 +117,12 @@ export interface Restaurant {
   rating: number;
   reviewCount: number;
   address: string;
+  area: string; // structured area field
   neighborhood: string;
-  city: string;
+  city: string; // structured city field
+  state: string; // structured state field
+  latitude: number; // structured latitude field
+  longitude: number; // structured longitude field
   phone: string;
   email: string;
   openingHours: {
@@ -87,6 +135,7 @@ export interface Restaurant {
   menuHighlights: MenuItem[];
   ownerId: string;
   featured?: boolean;
+  distanceKm?: number; // Calculated dynamically relative to user location
 }
 
 export interface SmartAllocationResult {
@@ -109,6 +158,25 @@ export interface WaitTimePrediction {
   alternativeTimes: string[];
 }
 
+export interface NearbyRestaurantRecommendation {
+  restaurantId: string;
+  restaurantName: string;
+  cuisine: string;
+  rating: number;
+  priceRange: string;
+  distance?: string;
+  openingHours: string;
+  availableTableCount: number;
+  heroImage: string;
+  address: string;
+  city: string;
+  sampleTable?: {
+    tableNumber: string;
+    capacity: number;
+    seatingType: SeatingType;
+  };
+}
+
 export interface AIAssistantMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -125,7 +193,9 @@ export interface AIAssistantMessage {
     seatingType: SeatingType;
     isAvailable: boolean;
     reasoning?: string;
+    distance?: string;
   };
+  nearbyRestaurants?: NearbyRestaurantRecommendation[];
   alternativeSuggestions?: {
     time: string;
     tableNumber: string;
@@ -133,4 +203,5 @@ export interface AIAssistantMessage {
     seatingType: string;
   }[];
   estimatedWaitMinutes?: number;
+  extractedLocation?: string;
 }

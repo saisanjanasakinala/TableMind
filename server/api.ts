@@ -6,6 +6,7 @@ import {
   isTimeOverlapping,
 } from './geminiService';
 import { Reservation, RestaurantTable } from '../src/types';
+import { INITIAL_RESTAURANTS, INITIAL_TABLES } from '../src/data/mockData';
 
 export const apiRouter = Router();
 
@@ -38,6 +39,11 @@ apiRouter.post('/gemini/assistant', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Message is required' });
     }
 
+    const effectiveRestaurants =
+      Array.isArray(restaurants) && restaurants.length > 0 ? restaurants : INITIAL_RESTAURANTS;
+    const effectiveTables =
+      Array.isArray(tables) && tables.length > 0 ? tables : INITIAL_TABLES;
+
     // Merge client reservations with any server-side verified reservations
     const mergedReservations = [...(reservations || [])];
     serverReservations.forEach((val) => {
@@ -49,8 +55,8 @@ apiRouter.post('/gemini/assistant', async (req: Request, res: Response) => {
     const result = await processAIAssistantMessage(
       message,
       history || [],
-      restaurants || [],
-      tables || [],
+      effectiveRestaurants,
+      effectiveTables,
       mergedReservations
     );
 
@@ -65,9 +71,12 @@ apiRouter.post('/gemini/assistant', async (req: Request, res: Response) => {
 apiRouter.post('/gemini/smart-allocate', (req: Request, res: Response) => {
   try {
     const { tables, reservations, date, time, guestCount, seatingPreference } = req.body;
-    if (!tables || !date || !time || !guestCount) {
+    if (!date || !time || !guestCount) {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
+
+    const effectiveTables =
+      Array.isArray(tables) && tables.length > 0 ? tables : INITIAL_TABLES;
 
     // Merge reservations
     const allReservations = [...(reservations || [])];
@@ -78,7 +87,7 @@ apiRouter.post('/gemini/smart-allocate', (req: Request, res: Response) => {
     });
 
     const allocation = smartAllocateTable(
-      tables as RestaurantTable[],
+      effectiveTables as RestaurantTable[],
       allReservations,
       date,
       time,
@@ -107,9 +116,12 @@ apiRouter.post('/gemini/smart-allocate', (req: Request, res: Response) => {
 apiRouter.post('/gemini/wait-time', (req: Request, res: Response) => {
   try {
     const { tables, reservations, date, time, guestCount } = req.body;
-    if (!tables || !date || !time || !guestCount) {
+    if (!date || !time || !guestCount) {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
+
+    const effectiveTables =
+      Array.isArray(tables) && tables.length > 0 ? tables : INITIAL_TABLES;
 
     const allReservations = [...(reservations || [])];
     serverReservations.forEach((val) => {
@@ -119,7 +131,7 @@ apiRouter.post('/gemini/wait-time', (req: Request, res: Response) => {
     });
 
     const prediction = calculateWaitTime(
-      tables as RestaurantTable[],
+      effectiveTables as RestaurantTable[],
       allReservations,
       date,
       time,

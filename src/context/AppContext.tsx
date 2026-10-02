@@ -6,13 +6,18 @@ import {
   RestaurantTable,
   Reservation,
   ReservationStatus,
+  UserLocation,
+  normalizeRole,
+  getRoleDisplayName,
 } from '../types';
 import {
   DEMO_USERS,
   INITIAL_RESTAURANTS,
   INITIAL_TABLES,
   INITIAL_RESERVATIONS,
+  PRESET_LOCATIONS,
   getTodayDateString,
+  calculateDistanceKm,
 } from '../data/mockData';
 
 export type AppView =
@@ -30,6 +35,53 @@ export type AppView =
   | 'admin-dashboard'
   | 'auth';
 
+export interface RouteProtectionRule {
+  allowedRoles: ('CUSTOMER' | 'RESTAURANT_OWNER' | 'PLATFORM_ADMIN')[];
+  getFallbackView: (userRole: 'CUSTOMER' | 'RESTAURANT_OWNER' | 'PLATFORM_ADMIN') => AppView;
+  deniedMessage: string;
+}
+
+export const PROTECTED_VIEWS: Partial<Record<AppView, RouteProtectionRule>> = {
+  'owner-dashboard': {
+    allowedRoles: ['RESTAURANT_OWNER', 'PLATFORM_ADMIN'],
+    getFallbackView: (role) => (role === 'CUSTOMER' ? 'customer-dashboard' : 'landing'),
+    deniedMessage: 'Access Denied: Restaurant Owner credentials required to access the Owner Dashboard.',
+  },
+  'owner-tables': {
+    allowedRoles: ['RESTAURANT_OWNER', 'PLATFORM_ADMIN'],
+    getFallbackView: (role) => (role === 'CUSTOMER' ? 'customer-dashboard' : 'landing'),
+    deniedMessage: 'Access Denied: Floor Plan & Table Management is restricted to Restaurant Owners.',
+  },
+  'owner-reservations': {
+    allowedRoles: ['RESTAURANT_OWNER', 'PLATFORM_ADMIN'],
+    getFallbackView: (role) => (role === 'CUSTOMER' ? 'customer-dashboard' : 'landing'),
+    deniedMessage: 'Access Denied: Restaurant reservation ledger is restricted to Restaurant Owners.',
+  },
+  'owner-analytics': {
+    allowedRoles: ['RESTAURANT_OWNER', 'PLATFORM_ADMIN'],
+    getFallbackView: (role) => (role === 'CUSTOMER' ? 'customer-dashboard' : 'landing'),
+    deniedMessage: 'Access Denied: Restaurant Analytics reports are restricted to Restaurant Owners.',
+  },
+  'admin-dashboard': {
+    allowedRoles: ['PLATFORM_ADMIN'],
+    getFallbackView: (role) => (role === 'RESTAURANT_OWNER' ? 'owner-dashboard' : 'customer-dashboard'),
+    deniedMessage: 'Access Denied: Platform Administrator privileges are required.',
+  },
+};
+
+export function getDefaultDashboardForRole(role: string | undefined): AppView {
+  const norm = normalizeRole(role);
+  switch (norm) {
+    case 'RESTAURANT_OWNER':
+      return 'owner-dashboard';
+    case 'PLATFORM_ADMIN':
+      return 'admin-dashboard';
+    case 'CUSTOMER':
+    default:
+      return 'customer-dashboard';
+  }
+}
+
 interface Toast {
   id: string;
   message: string;
@@ -39,8 +91,10 @@ interface Toast {
 interface AppContextType {
   currentUser: User;
   setCurrentUser: (user: User) => void;
+  accounts: User[];
+  switchDemoPersona: (role: UserRole) => void;
   switchRole: (role: UserRole) => void;
-  loginUser: (email: string, name?: string, role?: UserRole) => void;
+  loginUser: (email: string, name?: string, role?: UserRole, password?: string) => { success: boolean; error?: string };
   logoutUser: () => void;
   activeView: AppView;
   navigate: (view: AppView, restaurantId?: string) => void;
@@ -55,6 +109,23 @@ interface AppContextType {
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   removeToast: (id: string) => void;
   
+  // Location & Flow State
+  userLocation: UserLocation | null;
+  setUserLocation: (loc: UserLocation | null) => void;
+  searchRadiusKm: number;
+  setSearchRadiusKm: (radius: number) => void;
+  bookingDate: string;
+  setBookingDate: (date: string) => void;
+  bookingTime: string;
+  setBookingTime: (time: string) => void;
+  bookingPartySize: number;
+  setBookingPartySize: (guests: number) => void;
+
+  // User & Admin Operations
+  updateUserProfile: (updates: Partial<User>) => void;
+  adminUpdateUserRole: (userId: string, newRole: UserRole) => void;
+  adminDeleteUser: (userId: string) => void;
+
   // Table & Booking Operations
   bookReservation: (
     reservationDraft: Omit<Reservation, 'id' | 'reservationCode' | 'createdAt' | 'status'>
@@ -92,10 +163,12 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  USER: 'tablemind_user_v1',
-  RESTAURANTS: 'tablemind_restaurants_v1',
-  TABLES: 'tablemind_tables_v1',
+  USER: 'tablemind_user_v2',
+  ACCOUNTS: 'tablemind_registered_accounts_v2',
+  RESTAURANTS: 'tablemind_restaurants_v4',
+  TABLES: 'tablemind_tables_v4',
   RESERVATIONS: 'tablemind_reservations_v1',
+  LOCATION: 'tablemind_user_location_v2',
 };
 
 // Helper: time string "HH:MM" to minutes
@@ -114,24 +187,97 @@ function hasTimeCollision(t1: string, d1: number, t2: string, d2: number): boole
 }
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // 1. Current User
+  // 1. Registered Accounts Store (Persistent)
+  const [accounts, setAccounts] = useState<User[]>(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.ACCOUNTS);
+    if (saved) {
+      try {
+        const parsed: User[] = JSON.parse(saved);
+        const merged = [...parsed];
+        for (const demoU of DEMO_USERS) {
+          if (!merged.some((u) => u.email.toLowerCase() === demoU.email.toLowerCase())) {
+            merged.push(demoU);
+          }
+        }
+        return merged.map((u) => ({ ...u, role: normalizeRole(u.role) }));
+      } catch (e) { /* ignore */ }
+    }
+    return DEMO_USERS.map((u) => ({ ...u, role: normalizeRole(u.role) }));
+  });
+
+  // Current Authenticated User (with verified stored role)
   const [currentUser, setCurrentUser] = useState<User>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.USER);
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
+      try {
+        const parsed: User = JSON.parse(saved);
+        return {
+          ...parsed,
+          role: normalizeRole(parsed.role),
+        };
+      } catch (e) { /* ignore */ }
     }
-    return DEMO_USERS[0]; // Customer
+    return DEMO_USERS[0]; // Customer Alex Morgan
   });
 
   // 2. Navigation
   const [activeView, setActiveView] = useState<AppView>('landing');
-  const [selectedRestaurantId, setSelectedRestaurantId] = useState<string | null>('rest-1');
+  const [selectedRestaurantId, setSelectedRestaurantId] = useState<string | null>('rest-surampalem-1');
 
-  // 3. Entity States
+  // 3. Location State (defaults to Surampalem for rich demo)
+  const [userLocation, setUserLocation] = useState<UserLocation | null>(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.LOCATION);
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
+    }
+    // Default preset: Surampalem
+    const defaultPreset =
+      PRESET_LOCATIONS.find((p) => p.id === 'loc-surampalem') || PRESET_LOCATIONS[0];
+    return {
+      label: `${defaultPreset.name}, ${defaultPreset.state}`,
+      mode: 'preset',
+      latitude: defaultPreset.latitude,
+      longitude: defaultPreset.longitude,
+      city: defaultPreset.city,
+      area: defaultPreset.area,
+      state: defaultPreset.state,
+    };
+  });
+
+  const [searchRadiusKm, setSearchRadiusKm] = useState<number>(25);
+
+  // 4. Booking Flow Parameters
+  const [bookingDate, setBookingDate] = useState<string>(getTodayDateString());
+  const [bookingTime, setBookingTime] = useState<string>('19:00');
+  const [bookingPartySize, setBookingPartySize] = useState<number>(2);
+
+  // 5. Entity States
   const [restaurants, setRestaurants] = useState<Restaurant[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.RESTAURANTS);
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
+      try {
+        const parsed: Restaurant[] = JSON.parse(saved);
+        const merged = INITIAL_RESTAURANTS.map((initR) => {
+          const mod = parsed.find((p) => p.id === initR.id);
+          return mod
+            ? {
+                ...initR,
+                ...mod,
+                city: initR.city,
+                area: initR.area,
+                state: initR.state,
+                latitude: initR.latitude,
+                longitude: initR.longitude,
+              }
+            : initR;
+        });
+        for (const p of parsed) {
+          if (!merged.some((r) => r.id === p.id)) {
+            merged.push(p);
+          }
+        }
+        return merged;
+      } catch (e) { /* ignore */ }
     }
     return INITIAL_RESTAURANTS;
   });
@@ -139,7 +285,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [tables, setTables] = useState<RestaurantTable[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.TABLES);
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
+      try {
+        const parsed: RestaurantTable[] = JSON.parse(saved);
+        const merged = [...INITIAL_TABLES];
+        for (const p of parsed) {
+          if (!merged.some((t) => t.id === p.id)) {
+            merged.push(p);
+          }
+        }
+        return merged;
+      } catch (e) { /* ignore */ }
     }
     return INITIAL_TABLES;
   });
@@ -161,8 +316,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [currentUser]);
 
   useEffect(() => {
+    if (userLocation) {
+      localStorage.setItem(STORAGE_KEYS.LOCATION, JSON.stringify(userLocation));
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.LOCATION);
+    }
+  }, [userLocation]);
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.RESTAURANTS, JSON.stringify(restaurants));
   }, [restaurants]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(tables));
+  }, [tables]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.RESERVATIONS, JSON.stringify(reservations));
+  }, [reservations]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(tables));
@@ -185,6 +356,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const navigate = (view: AppView, restaurantId?: string) => {
+    // 1. Role-based Access Control Check
+    const rule = PROTECTED_VIEWS[view];
+    const userRole = normalizeRole(currentUser.role);
+
+    if (rule && !rule.allowedRoles.includes(userRole)) {
+      const fallback = rule.getFallbackView(userRole);
+      showToast(rule.deniedMessage, 'error');
+      if (restaurantId) setSelectedRestaurantId(restaurantId);
+      setActiveView(fallback);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
     if (restaurantId) {
       setSelectedRestaurantId(restaurantId);
     }
@@ -192,50 +376,103 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const switchRole = (role: UserRole) => {
-    const found = DEMO_USERS.find((u) => u.role === role);
+  const switchDemoPersona = (role: UserRole) => {
+    const targetNorm = normalizeRole(role);
+    const found = DEMO_USERS.find((u) => normalizeRole(u.role) === targetNorm);
     if (found) {
-      setCurrentUser(found);
-      showToast(`Switched view to ${role.toUpperCase()} (${found.name})`, 'info');
-      if (role === 'owner') {
-        setSelectedRestaurantId(found.restaurantId || 'rest-1');
+      const demoAccount: User = {
+        ...found,
+        role: targetNorm,
+      };
+      setCurrentUser(demoAccount);
+      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(demoAccount));
+      showToast(`DEMO MODE: Switched persona to ${getRoleDisplayName(targetNorm)} (${demoAccount.name})`, 'info');
+
+      if (targetNorm === 'RESTAURANT_OWNER') {
+        setSelectedRestaurantId(demoAccount.restaurantId || 'rest-1');
         setActiveView('owner-dashboard');
-      } else if (role === 'admin') {
+      } else if (targetNorm === 'PLATFORM_ADMIN') {
         setActiveView('admin-dashboard');
       } else {
-        setActiveView('landing');
+        setActiveView('customer-dashboard');
       }
     }
   };
 
-  const loginUser = (email: string, name?: string, role: UserRole = 'customer') => {
-    const existing = DEMO_USERS.find((u) => u.email.toLowerCase() === email.toLowerCase());
-    if (existing) {
-      setCurrentUser(existing);
-      showToast(`Welcome back, ${existing.name}!`, 'success');
-      if (existing.role === 'owner') navigate('owner-dashboard', existing.restaurantId);
-      else if (existing.role === 'admin') navigate('admin-dashboard');
-      else navigate('customer-dashboard');
-    } else {
-      const newUser: User = {
-        id: `user-${Date.now()}`,
-        name: name || email.split('@')[0],
-        email,
-        role,
-        avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name || email)}`,
-        restaurantId: role === 'owner' ? 'rest-1' : undefined,
-      };
-      setCurrentUser(newUser);
-      showToast(`Welcome to TableMind AI, ${newUser.name}!`, 'success');
-      navigate(role === 'owner' ? 'owner-dashboard' : 'landing');
+  const switchRole = switchDemoPersona; // Alias for backward compatibility
+
+  const loginUser = (email: string, name?: string, role: UserRole = 'CUSTOMER', password?: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) {
+      showToast('Please enter an email address.', 'error');
+      return { success: false, error: 'Email is required' };
     }
+
+    // 1. Look up existing registered user account (case-insensitive)
+    const existing = accounts.find((u) => u.email.toLowerCase() === cleanEmail);
+
+    if (existing) {
+      // The stored account role is authoritative! A customer account cannot become owner/admin by UI override
+      const storedRole = normalizeRole(existing.role);
+      const authenticatedUser: User = {
+        ...existing,
+        role: storedRole,
+      };
+
+      setCurrentUser(authenticatedUser);
+      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(authenticatedUser));
+      showToast(`Welcome back, ${authenticatedUser.name}! (${getRoleDisplayName(storedRole)})`, 'success');
+
+      if (storedRole === 'RESTAURANT_OWNER') {
+        const restId = authenticatedUser.restaurantId || 'rest-1';
+        setSelectedRestaurantId(restId);
+        setActiveView('owner-dashboard');
+      } else if (storedRole === 'PLATFORM_ADMIN') {
+        setActiveView('admin-dashboard');
+      } else {
+        setActiveView('customer-dashboard');
+      }
+      return { success: true };
+    }
+
+    // 2. New Account Registration: store the chosen role permanently with the account profile
+    const assignedRole = normalizeRole(role);
+    const newAccount: User = {
+      id: `user-${Date.now()}`,
+      name: name?.trim() || cleanEmail.split('@')[0],
+      email: cleanEmail,
+      role: assignedRole,
+      avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name || email)}`,
+      restaurantId: assignedRole === 'RESTAURANT_OWNER' ? 'rest-1' : undefined,
+      password: password || undefined,
+      createdAt: new Date().toISOString(),
+    };
+
+    const updatedAccounts = [...accounts, newAccount];
+    setAccounts(updatedAccounts);
+    localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(updatedAccounts));
+
+    setCurrentUser(newAccount);
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(newAccount));
+    showToast(`Account registered as ${getRoleDisplayName(assignedRole)}! Welcome, ${newAccount.name}.`, 'success');
+
+    if (assignedRole === 'RESTAURANT_OWNER') {
+      setSelectedRestaurantId('rest-1');
+      setActiveView('owner-dashboard');
+    } else if (assignedRole === 'PLATFORM_ADMIN') {
+      setActiveView('admin-dashboard');
+    } else {
+      setActiveView('customer-dashboard');
+    }
+    return { success: true };
   };
 
   const logoutUser = () => {
-    const defaultCust = DEMO_USERS[0];
-    setCurrentUser(defaultCust);
-    showToast('Signed out. Reset to demo customer.', 'info');
-    navigate('landing');
+    const guestCustomer = DEMO_USERS[0];
+    setCurrentUser(guestCustomer);
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(guestCustomer));
+    showToast('Signed out. Switched to public guest session.', 'info');
+    setActiveView('landing');
   };
 
   // Check table availability
@@ -424,6 +661,72 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast('Table active status toggled.', 'info');
   };
 
+  // Profile updates (role is immutable through normal profile editing)
+  const updateUserProfile = (updates: Partial<User>) => {
+    // Prevent unauthorized role alteration via profile edit
+    const safeUpdates = { ...updates };
+    delete safeUpdates.role;
+    delete safeUpdates.id;
+
+    const updatedUser = { ...currentUser, ...safeUpdates };
+    setCurrentUser(updatedUser);
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(updatedUser));
+
+    setAccounts((prev) => {
+      const next = prev.map((acc) => (acc.id === updatedUser.id ? { ...acc, ...safeUpdates } : acc));
+      localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(next));
+      return next;
+    });
+
+    showToast('Your profile preferences have been updated.', 'success');
+  };
+
+  // Platform Admin User Management: change role
+  const adminUpdateUserRole = (userId: string, newRole: UserRole) => {
+    const callerRole = normalizeRole(currentUser.role);
+    if (callerRole !== 'PLATFORM_ADMIN') {
+      showToast('Unauthorized: Only Platform Admins can modify account roles.', 'error');
+      return;
+    }
+
+    const normRole = normalizeRole(newRole);
+    setAccounts((prev) => {
+      const next = prev.map((acc) => (acc.id === userId ? { ...acc, role: normRole } : acc));
+      localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(next));
+      return next;
+    });
+
+    if (currentUser.id === userId) {
+      const updatedSelf = { ...currentUser, role: normRole };
+      setCurrentUser(updatedSelf);
+      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(updatedSelf));
+    }
+
+    showToast(`User role successfully changed to ${getRoleDisplayName(normRole)}.`, 'success');
+  };
+
+  // Platform Admin User Management: delete user
+  const adminDeleteUser = (userId: string) => {
+    const callerRole = normalizeRole(currentUser.role);
+    if (callerRole !== 'PLATFORM_ADMIN') {
+      showToast('Unauthorized: Only Platform Admins can delete users.', 'error');
+      return;
+    }
+
+    if (currentUser.id === userId) {
+      showToast('Cannot delete your own active administrator account.', 'error');
+      return;
+    }
+
+    setAccounts((prev) => {
+      const next = prev.filter((acc) => acc.id !== userId);
+      localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(next));
+      return next;
+    });
+
+    showToast('User account removed.', 'info');
+  };
+
   // Admin operations
   const addRestaurant = (newRest: Omit<Restaurant, 'id'>) => {
     const id = `rest-${Date.now()}`;
@@ -463,9 +766,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       value={{
         currentUser,
         setCurrentUser,
+        accounts,
+        switchDemoPersona,
         switchRole,
         loginUser,
         logoutUser,
+        updateUserProfile,
+        adminUpdateUserRole,
+        adminDeleteUser,
         activeView,
         navigate,
         selectedRestaurantId,
@@ -478,6 +786,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toasts,
         showToast,
         removeToast,
+        userLocation,
+        setUserLocation,
+        searchRadiusKm,
+        setSearchRadiusKm,
+        bookingDate,
+        setBookingDate,
+        bookingTime,
+        setBookingTime,
+        bookingPartySize,
+        setBookingPartySize,
         bookReservation,
         cancelReservation,
         modifyReservation,

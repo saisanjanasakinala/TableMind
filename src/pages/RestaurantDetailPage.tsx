@@ -14,11 +14,13 @@ import {
   CheckCircle,
   Eye,
   Store,
+  Navigation2,
 } from 'lucide-react';
 import { RestaurantTable, SeatingType } from '../types';
+import { calculateDistanceKm, formatDistance } from '../data/mockData';
 
 export const RestaurantDetailPage: React.FC = () => {
-  const { selectedRestaurant, tables, navigate } = useApp();
+  const { selectedRestaurant, tables, navigate, userLocation } = useApp();
 
   const [activeTab, setActiveTab] = useState<'menu' | 'layout' | 'about'>('menu');
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
@@ -352,6 +354,19 @@ export const RestaurantDetailPage: React.FC = () => {
                     <div className="text-[11px] text-stone-400">
                       {selectedRestaurant.neighborhood}, {selectedRestaurant.city}
                     </div>
+                    {userLocation && selectedRestaurant.latitude !== undefined && selectedRestaurant.longitude !== undefined && (
+                      <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-amber-300 px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/20">
+                        <Navigation2 className="w-2.5 h-2.5 rotate-45 fill-amber-300" />
+                        {formatDistance(
+                          calculateDistanceKm(
+                            userLocation.latitude,
+                            userLocation.longitude,
+                            selectedRestaurant.latitude,
+                            selectedRestaurant.longitude
+                          )
+                        )} from {userLocation.label.split(',')[0]}
+                      </div>
+                    )}
                   </div>
                 </div>
 

@@ -225,24 +225,27 @@ export async function processAIAssistantMessage(
       id: r.id,
       name: r.name,
       cuisine: r.cuisine,
+      city: r.city,
       neighborhood: r.neighborhood,
+      address: r.address,
+      latitude: r.latitude,
+      longitude: r.longitude,
       openingHours: r.openingHours,
     }));
 
-    const systemInstruction = `You are "TableMind AI Assistant", an elite restaurant reservation concierge.
+    const systemInstruction = `You are "TableMind AI Assistant", an elite location-aware restaurant reservation concierge.
 Your mission is to help guests find and book the perfect restaurant table in conversational natural language.
 
-CURRENT RESTAURANTS IN DATABASE:
+CURRENT RESTAURANTS IN DATABASE (with geographical locations):
 ${JSON.stringify(restaurantsSummary, null, 2)}
 
 CORE RULES:
-1. Extract booking intent: restaurant, date (YYYY-MM-DD), time (HH:MM), guest count (number), seating preference (indoor, patio, booth, window, bar, private).
-2. If today or tomorrow is mentioned, calculate relative to current date (local timezone).
-3. If information is missing (like party size or time), politely ask for clarification.
-4. Output your answer in JSON matching the exact schema provided.
-5. In "extractedBooking", include the parsed parameters. If the restaurant is identified, set restaurantId and restaurantName.
-6. Provide a warm, refined, hospitable message in "replyText".
-`;
+1. Extract booking intent: restaurant, location (e.g. Hyderabad, Surampalem, Kakinada, San Francisco, etc.), date (YYYY-MM-DD), time (HH:MM), guest count (number), seating preference (indoor, patio, booth, window, bar, private).
+2. If the user specifies a location (e.g., "near Surampalem" or "near Hyderabad"), ONLY select and recommend restaurants strictly belonging to that requested location. Never recommend Surampalem restaurants for Hyderabad queries, and never recommend Hyderabad restaurants for Surampalem queries.
+3. If "tomorrow" or "today" is mentioned, calculate relative to current date (local timezone).
+4. If party size or time is omitted, politely assume standard defaults (e.g. 2 guests, 19:00) while confirming.
+5. In "replyText", mention the location and why the recommended restaurant/table is ideal.
+6. Output valid JSON adhering strictly to the responseSchema.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
@@ -264,13 +267,14 @@ CORE RULES:
           properties: {
             replyText: {
               type: Type.STRING,
-              description: 'Friendly, hospitable response to the customer',
+              description: 'Friendly, hospitable response to the customer highlighting location and availability',
             },
             extractedBooking: {
               type: Type.OBJECT,
               properties: {
                 restaurantId: { type: Type.STRING },
                 restaurantName: { type: Type.STRING },
+                location: { type: Type.STRING, description: 'Location, city, area or landmark extracted from query (e.g. Surampalem, Hyderabad)' },
                 date: { type: Type.STRING },
                 time: { type: Type.STRING },
                 guestCount: { type: Type.INTEGER },
@@ -290,64 +294,155 @@ CORE RULES:
     const parsed = JSON.parse(response.text?.trim() || '{}');
     const booking = parsed.extractedBooking;
 
-    // Check availability if we have enough booking details
+    const targetDate = booking?.date || new Date().toISOString().split('T')[0];
+    const targetTime = booking?.time || '19:00';
+    const guests = Number(booking?.guestCount) || 2;
+    const seating = booking?.seatingPreference as any;
+    const reqLocation = (booking?.location || '').toLowerCase();
+
+    // Find candidate restaurants matching restaurantId OR location
+    let candidateRestaurants: Restaurant[] = [];
+    if (booking?.restaurantId) {
+      const match = restaurants.find((r) => r.id === booking.restaurantId);
+      if (match) candidateRestaurants.push(match);
+    }
+
+    if (reqLocation) {
+      let locMatches: Restaurant[] = [];
+      if (
+        reqLocation.includes('hyderabad') ||
+        reqLocation.includes('hitec') ||
+        reqLocation.includes('banjara') ||
+        reqLocation.includes('jubilee') ||
+        reqLocation.includes('gandipet')
+      ) {
+        locMatches = restaurants.filter((r) => r.city.toLowerCase() === 'hyderabad');
+      } else if (
+        reqLocation.includes('surampalem') ||
+        reqLocation.includes('aditya') ||
+        reqLocation.includes('adb')
+      ) {
+        locMatches = restaurants.filter(
+          (r) => r.city.toLowerCase() === 'surampalem' || r.city.toLowerCase() === 'kakinada'
+        );
+      } else if (reqLocation.includes('kakinada')) {
+        locMatches = restaurants.filter(
+          (r) => r.city.toLowerCase() === 'kakinada' || r.city.toLowerCase() === 'surampalem'
+        );
+      } else if (reqLocation.includes('san francisco') || reqLocation.includes('sf')) {
+        locMatches = restaurants.filter((r) => r.city.toLowerCase() === 'san francisco');
+      } else {
+        locMatches = restaurants.filter(
+          (r) =>
+            r.city.toLowerCase().includes(reqLocation) ||
+            r.area.toLowerCase().includes(reqLocation) ||
+            r.address.toLowerCase().includes(reqLocation) ||
+            r.neighborhood.toLowerCase().includes(reqLocation) ||
+            r.name.toLowerCase().includes(reqLocation)
+        );
+      }
+
+      for (const lm of locMatches) {
+        if (!candidateRestaurants.some((cr) => cr.id === lm.id)) {
+          candidateRestaurants.push(lm);
+        }
+      }
+    }
+
+    if (candidateRestaurants.length === 0) {
+      if (!reqLocation) {
+        candidateRestaurants = restaurants.slice(0, 3);
+      }
+    }
+
+    // Build nearby restaurant recommendations with available tables
+    const nearbyRestaurants: any[] = [];
+    let bestAllocation: any = null;
+    let bestRestaurant: Restaurant | null = null;
+
+    for (const rest of candidateRestaurants) {
+      const restTables = tables.filter((t) => t.restaurantId === rest.id && t.isActive);
+      const eligible = restTables.filter((t) => t.capacity >= guests);
+      const freeTables = eligible.filter((t) => isTableAvailable(t, targetDate, targetTime, reservations));
+
+      const allocation = smartAllocateTable(restTables, reservations, targetDate, targetTime, guests, seating);
+      if (!bestAllocation && allocation) {
+        bestAllocation = allocation;
+        bestRestaurant = rest;
+      }
+
+      nearbyRestaurants.push({
+        restaurantId: rest.id,
+        restaurantName: rest.name,
+        cuisine: rest.cuisine,
+        rating: rest.rating,
+        priceRange: rest.priceRange,
+        openingHours: `${rest.openingHours.open} - ${rest.openingHours.close}`,
+        availableTableCount: freeTables.length,
+        heroImage: rest.heroImage,
+        address: `${rest.address}, ${rest.city}`,
+        city: rest.city,
+        sampleTable: allocation
+          ? {
+              tableNumber: allocation.recommendedTable.tableNumber,
+              capacity: allocation.recommendedTable.capacity,
+              seatingType: allocation.recommendedTable.seatingType,
+            }
+          : undefined,
+      });
+    }
+
     let actionableReservation = undefined;
     let alternativeSuggestions = undefined;
     let estimatedWaitMinutes = undefined;
 
-    if (booking?.restaurantId && booking?.guestCount) {
-      const rest = restaurants.find((r) => r.id === booking.restaurantId) || restaurants[0];
-      const restTables = tables.filter((t) => t.restaurantId === rest.id);
-      
-      const targetDate = booking.date || new Date().toISOString().split('T')[0];
-      const targetTime = booking.time || '19:00';
-      const guests = Number(booking.guestCount) || 2;
-      const seating = booking.seatingPreference as any;
+    if (bestAllocation && bestRestaurant) {
+      actionableReservation = {
+        restaurantId: bestRestaurant.id,
+        restaurantName: bestRestaurant.name,
+        tableId: bestAllocation.recommendedTable.id,
+        tableNumber: bestAllocation.recommendedTable.tableNumber,
+        date: targetDate,
+        time: targetTime,
+        guestCount: guests,
+        seatingType: bestAllocation.recommendedTable.seatingType,
+        isAvailable: true,
+        reasoning: bestAllocation.reason,
+      };
+    } else {
+      // Primary restaurant busy, compute wait time
+      const primaryRest = candidateRestaurants[0] || restaurants[0];
+      const restTables = tables.filter((t) => t.restaurantId === primaryRest.id);
+      const wait = calculateWaitTime(restTables, reservations, targetDate, targetTime, guests);
+      estimatedWaitMinutes = wait.estimatedWaitMinutes;
 
-      // Smart allocation check
-      const allocation = smartAllocateTable(restTables, reservations, targetDate, targetTime, guests, seating);
-
-      if (allocation) {
-        actionableReservation = {
-          restaurantId: rest.id,
-          restaurantName: rest.name,
-          tableId: allocation.recommendedTable.id,
-          tableNumber: allocation.recommendedTable.tableNumber,
-          date: targetDate,
-          time: targetTime,
-          guestCount: guests,
-          seatingType: allocation.recommendedTable.seatingType,
-          isAvailable: true,
-          reasoning: allocation.reason,
-        };
-      } else {
-        // Table not available! Check wait time and alternatives
-        const wait = calculateWaitTime(restTables, reservations, targetDate, targetTime, guests);
-        estimatedWaitMinutes = wait.estimatedWaitMinutes;
-        
-        // Find alternative tables at next available slot
-        if (wait.alternativeTimes.length > 0) {
-          const altTime = wait.alternativeTimes[0];
-          const altAlloc = smartAllocateTable(restTables, reservations, targetDate, altTime, guests, seating);
-          if (altAlloc) {
-            alternativeSuggestions = [
-              {
-                time: altTime,
-                tableNumber: altAlloc.recommendedTable.tableNumber,
-                capacity: altAlloc.recommendedTable.capacity,
-                seatingType: altAlloc.recommendedTable.seatingType,
-              },
-            ];
-          }
+      if (wait.alternativeTimes.length > 0) {
+        const altTime = wait.alternativeTimes[0];
+        const altAlloc = smartAllocateTable(restTables, reservations, targetDate, altTime, guests, seating);
+        if (altAlloc) {
+          alternativeSuggestions = [
+            {
+              time: altTime,
+              tableNumber: altAlloc.recommendedTable.tableNumber,
+              capacity: altAlloc.recommendedTable.capacity,
+              seatingType: altAlloc.recommendedTable.seatingType,
+            },
+          ];
         }
       }
     }
 
     return {
-      replyText: parsed.replyText || 'I would be delighted to assist with your reservation. Could you share your preferred date, time, and party size?',
+      replyText:
+        parsed.replyText ||
+        (bestRestaurant
+          ? `I found great tables for ${guests} guests near ${reqLocation || bestRestaurant.city} on ${targetDate} at ${targetTime}.`
+          : 'I have checked our real-time table inventory for your requested criteria.'),
       actionableReservation,
+      nearbyRestaurants: nearbyRestaurants.length > 0 ? nearbyRestaurants : undefined,
       alternativeSuggestions,
       estimatedWaitMinutes,
+      extractedLocation: booking?.location,
     };
   } catch (err) {
     console.error('Gemini assistant error, falling back to local reasoning:', err);
@@ -364,16 +459,80 @@ function fallbackAIAssistant(
 ) {
   const text = userMessage.toLowerCase();
 
-  // Find restaurant
-  let targetRest = restaurants[0];
-  for (const r of restaurants) {
-    if (text.includes(r.name.toLowerCase()) || text.includes(r.cuisine.toLowerCase().split(' ')[0])) {
-      targetRest = r;
-      break;
+  // 1. Extract location
+  let location = '';
+  if (
+    text.includes('hyderabad') ||
+    text.includes('hitec') ||
+    text.includes('banjara') ||
+    text.includes('jubilee') ||
+    text.includes('gandipet') ||
+    text.includes('madhapur')
+  ) {
+    location = 'Hyderabad';
+  } else if (text.includes('surampalem') || text.includes('aditya') || text.includes('adb')) {
+    location = 'Surampalem';
+  } else if (text.includes('kakinada')) {
+    location = 'Kakinada';
+  } else if (text.includes('rajahmundry')) {
+    location = 'Rajahmundry';
+  } else if (text.includes('san francisco') || text.includes('downtown') || text.includes('sf')) {
+    location = 'San Francisco';
+  } else {
+    // Regex matching "near [Location]" or "in [Location]"
+    const locMatch = text.match(/(?:near|in|around|at)\s+([a-zA-Z\s]+?)(?:\s+for|\s+tomorrow|\s+tonight|\s+at\s+\d|\.|$)/i);
+    if (locMatch && locMatch[1]) {
+      location = locMatch[1].trim();
     }
   }
 
-  // Extract guests
+  // 2. Filter candidate restaurants strictly by location or query
+  let matchedRestaurants: Restaurant[] = [];
+  if (location) {
+    const locLower = location.toLowerCase();
+    if (locLower.includes('hyderabad')) {
+      matchedRestaurants = restaurants.filter((r) => r.city.toLowerCase() === 'hyderabad');
+    } else if (locLower.includes('surampalem')) {
+      matchedRestaurants = restaurants.filter(
+        (r) => r.city.toLowerCase() === 'surampalem' || r.city.toLowerCase() === 'kakinada'
+      );
+    } else if (locLower.includes('kakinada')) {
+      matchedRestaurants = restaurants.filter(
+        (r) => r.city.toLowerCase() === 'kakinada' || r.city.toLowerCase() === 'surampalem'
+      );
+    } else if (locLower.includes('san francisco') || locLower.includes('sf')) {
+      matchedRestaurants = restaurants.filter((r) => r.city.toLowerCase() === 'san francisco');
+    } else {
+      matchedRestaurants = restaurants.filter(
+        (r) =>
+          r.city.toLowerCase().includes(locLower) ||
+          r.area.toLowerCase().includes(locLower) ||
+          r.neighborhood.toLowerCase().includes(locLower) ||
+          r.address.toLowerCase().includes(locLower) ||
+          r.name.toLowerCase().includes(locLower)
+      );
+    }
+  } else {
+    matchedRestaurants = restaurants.filter(
+      (r) => text.includes(r.name.toLowerCase()) || text.includes(r.cuisine.toLowerCase().split(' ')[0])
+    );
+  }
+
+  if (matchedRestaurants.length === 0 && !location) {
+    matchedRestaurants = restaurants.slice(0, 3);
+  }
+
+  if (matchedRestaurants.length === 0) {
+    return {
+      replyText: `I couldn't find any partner restaurants near "${location || 'the requested location'}". We currently have partner restaurants in Hyderabad, Surampalem, Kakinada, and San Francisco. Would you like to view tables in one of those areas?`,
+      nearbyRestaurants: [],
+      extractedLocation: location,
+    };
+  }
+
+  let targetRest = matchedRestaurants[0];
+
+  // 3. Extract guests
   let guests = 2;
   const guestMatch = text.match(/(\d+)\s*(people|guests|persons|person|party of\s*(\d+)|top)/i);
   if (guestMatch) {
@@ -383,11 +542,11 @@ function fallbackAIAssistant(
   else if (text.includes('for six') || text.includes('6 people')) guests = 6;
   else if (text.includes('for eight') || text.includes('8 people')) guests = 8;
 
-  // Extract time specifically (e.g. 7 PM, 7:30 PM, 19:00, or 'at 7')
+  // 4. Extract time
   let time = '19:00';
   const timeWithAmpm = text.match(/(?:at\s+|around\s+)?(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
   const time24h = text.match(/(?:at\s+|around\s+)?(\d{1,2}):(\d{2})/i);
-  const timeAt = text.match(/(?:at|around)\s+(\d{1,2})/i);
+  const timeAt = text.match(/(?:at|around)\s+(\d{1,2})(?!\s*(?:people|guests|person))/i);
 
   if (timeWithAmpm) {
     let hour = parseInt(timeWithAmpm[1], 10);
@@ -402,11 +561,11 @@ function fallbackAIAssistant(
     time = `${String(hour).padStart(2, '0')}:${minute}`;
   } else if (timeAt) {
     let hour = parseInt(timeAt[1], 10);
-    if (hour <= 11) hour += 12; // default to evening hours for dinner
+    if (hour <= 11) hour += 12;
     time = `${String(hour).padStart(2, '0')}:00`;
   }
 
-  // Extract date
+  // 5. Extract date
   const now = new Date();
   let date = now.toISOString().split('T')[0];
   if (text.includes('tomorrow')) {
@@ -415,7 +574,7 @@ function fallbackAIAssistant(
     date = d.toISOString().split('T')[0];
   }
 
-  // Seating preference
+  // 6. Seating preference
   let seating: any = undefined;
   if (text.includes('booth')) seating = 'booth';
   else if (text.includes('window')) seating = 'window';
@@ -423,37 +582,77 @@ function fallbackAIAssistant(
   else if (text.includes('bar')) seating = 'bar';
   else if (text.includes('private')) seating = 'private';
 
-  // Check allocation
-  const restTables = tables.filter((t) => t.restaurantId === targetRest.id);
-  const allocation = smartAllocateTable(restTables, reservations, date, time, guests, seating);
+  // 7. Check allocation across matching restaurants
+  const nearbyRecommendations: any[] = [];
+  let bestAlloc: any = null;
+  let chosenRest: Restaurant = targetRest;
 
-  if (allocation) {
+  for (const r of matchedRestaurants) {
+    const restTables = tables.filter((t) => t.restaurantId === r.id && t.isActive);
+    const eligible = restTables.filter((t) => t.capacity >= guests);
+    const freeTables = eligible.filter((t) => isTableAvailable(t, date, time, reservations));
+    const alloc = smartAllocateTable(restTables, reservations, date, time, guests, seating);
+
+    if (!bestAlloc && alloc) {
+      bestAlloc = alloc;
+      chosenRest = r;
+    }
+
+    nearbyRecommendations.push({
+      restaurantId: r.id,
+      restaurantName: r.name,
+      cuisine: r.cuisine,
+      rating: r.rating,
+      priceRange: r.priceRange,
+      openingHours: `${r.openingHours.open} - ${r.openingHours.close}`,
+      availableTableCount: freeTables.length,
+      heroImage: r.heroImage,
+      address: `${r.address}, ${r.city}`,
+      city: r.city,
+      sampleTable: alloc
+        ? {
+            tableNumber: alloc.recommendedTable.tableNumber,
+            capacity: alloc.recommendedTable.capacity,
+            seatingType: alloc.recommendedTable.seatingType,
+          }
+        : undefined,
+    });
+  }
+
+  if (bestAlloc) {
+    const locPrefix = location ? ` near ${location}` : '';
     return {
-      replyText: `Great news! I have reserved a preview for Table ${allocation.recommendedTable.tableNumber} (${allocation.recommendedTable.seatingType.toUpperCase()}, capacity ${allocation.recommendedTable.capacity}) at ${targetRest.name} for ${guests} guests on ${date} at ${time}. ${allocation.reason}`,
+      replyText: `Great news! I located ${matchedRestaurants.length} verified restaurant${matchedRestaurants.length > 1 ? 's' : ''}${locPrefix}. For your party of ${guests} on ${date} at ${time}, I recommend Table ${bestAlloc.recommendedTable.tableNumber} (${bestAlloc.recommendedTable.seatingType.toUpperCase()}, seats ${bestAlloc.recommendedTable.capacity}) at ${chosenRest.name}. ${bestAlloc.reason}`,
       actionableReservation: {
-        restaurantId: targetRest.id,
-        restaurantName: targetRest.name,
-        tableId: allocation.recommendedTable.id,
-        tableNumber: allocation.recommendedTable.tableNumber,
+        restaurantId: chosenRest.id,
+        restaurantName: chosenRest.name,
+        tableId: bestAlloc.recommendedTable.id,
+        tableNumber: bestAlloc.recommendedTable.tableNumber,
         date,
         time,
         guestCount: guests,
-        seatingType: allocation.recommendedTable.seatingType,
+        seatingType: bestAlloc.recommendedTable.seatingType,
         isAvailable: true,
-        reasoning: allocation.reason,
+        reasoning: bestAlloc.reason,
       },
+      nearbyRestaurants: nearbyRecommendations,
+      extractedLocation: location,
     };
   } else {
+    const restTables = tables.filter((t) => t.restaurantId === targetRest.id);
     const wait = calculateWaitTime(restTables, reservations, date, time, guests);
     return {
-      replyText: `I checked real-time availability at ${targetRest.name} for ${guests} guests at ${time} on ${date}, and all matching tables are currently booked. Estimated wait time is approximately ${wait.estimatedWaitMinutes} minutes. We have openings at alternative times like ${wait.alternativeTimes.join(', ')}.`,
+      replyText: `I checked real-time availability${location ? ` near ${location}` : ''} for ${guests} guests at ${time} on ${date}. Peak dining tables are currently held; estimated wait is ~${wait.estimatedWaitMinutes} mins. Openings are available at alternative times: ${wait.alternativeTimes.join(', ')}.`,
       estimatedWaitMinutes: wait.estimatedWaitMinutes,
+      nearbyRestaurants: nearbyRecommendations,
       alternativeSuggestions: wait.alternativeTimes.map((t) => ({
         time: t,
         tableNumber: 'Next Open',
         capacity: guests,
         seatingType: seating || 'indoor',
       })),
+      extractedLocation: location,
     };
   }
 }
+

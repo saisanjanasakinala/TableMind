@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   Sparkles,
@@ -14,16 +14,43 @@ import {
   SlidersHorizontal,
   ChevronRight,
   CheckCircle,
+  Compass,
 } from 'lucide-react';
-import { getTodayDateString, getTomorrowDateString } from '../data/mockData';
+import { getTodayDateString, getTomorrowDateString, filterRestaurantByLocation } from '../data/mockData';
+import { LocationSelector } from '../components/LocationSelector';
+import { FindTablesFlowBar } from '../components/FindTablesFlowBar';
 
 export const LandingPage: React.FC = () => {
-  const { restaurants, tables, reservations, navigate } = useApp();
+  const {
+    restaurants,
+    tables,
+    reservations,
+    navigate,
+    userLocation,
+    searchRadiusKm,
+    bookingDate,
+    setBookingDate,
+    bookingTime,
+    setBookingTime,
+    bookingPartySize,
+    setBookingPartySize,
+  } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedGuests, setSelectedGuests] = useState(2);
-  const [selectedDate, setSelectedDate] = useState(getTodayDateString());
-  const [selectedTime, setSelectedTime] = useState('19:00');
+
+  const displayedLocationRestaurants = useMemo(() => {
+    if (userLocation) {
+      const matched = restaurants.filter((r) =>
+        filterRestaurantByLocation(r, userLocation, searchRadiusKm)
+      );
+      if (matched.length > 0) return matched;
+    }
+    return restaurants;
+  }, [restaurants, userLocation, searchRadiusKm]);
+
+  const featuredRestaurants = useMemo(() => {
+    return displayedLocationRestaurants.slice(0, 3);
+  }, [displayedLocationRestaurants]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,33 +78,48 @@ export const LandingPage: React.FC = () => {
             {/* Pill Tag */}
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold mb-6">
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>Next-Generation Restaurant Intelligence</span>
+              <span>Location-Aware Restaurant Intelligence</span>
             </div>
 
             <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold text-white tracking-tight leading-[1.15] font-display">
               Smart Table Reservations,{' '}
               <span className="text-transparent bg-clip-text bg-gradient-to-r from-amber-400 via-amber-200 to-orange-400">
-                Powered by AI.
+                Anywhere You Are.
               </span>
             </h1>
 
             <p className="mt-5 text-base sm:text-lg text-stone-300 leading-relaxed font-normal">
-              Seamless conversational booking for diners, intelligent table allocation to minimize
-              wasted capacity, predictive wait-times, and guaranteed zero double bookings for restaurant operators.
+              Find restaurants near your current location, discover live table capacity, conversational AI concierge booking, and guaranteed zero double bookings.
             </p>
 
-            {/* AI Assistant Quick Prompt Pill */}
+            {/* AI Assistant Quick Prompt Pills */}
             <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-stone-400">
               <span className="flex items-center gap-1 text-amber-400 font-medium">
-                <Sparkles className="w-3 h-3" /> Quick AI prompt:
+                <Sparkles className="w-3 h-3" /> Try AI Concierge prompt:
               </span>
               <button
-                onClick={() => handleAskAIExample("I need a table for 4 tomorrow at 7 PM at L'Étoile Brasserie, booth preferred")}
+                onClick={() => handleAskAIExample("Find a table for 4 people tomorrow at 7 PM near Surampalem.")}
+                className="px-3 py-1 rounded-full bg-stone-900 border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 transition-colors cursor-pointer font-medium"
+              >
+                “Table for 4 tomorrow at 7 PM near Surampalem” →
+              </button>
+              <button
+                onClick={() => handleAskAIExample("Find a romantic booth for 2 tonight near Downtown San Francisco")}
                 className="px-3 py-1 rounded-full bg-stone-900 border border-stone-800 hover:border-amber-500/50 hover:text-amber-300 transition-colors cursor-pointer"
               >
-                “Table for 4 tomorrow at 7 PM, booth preferred” →
+                “Booth for 2 tonight near Downtown SF” →
               </button>
             </div>
+          </div>
+
+          {/* Guided Find Tables Flow Progress Bar */}
+          <div className="max-w-4xl mx-auto mb-4">
+            <FindTablesFlowBar currentStep="location" />
+          </div>
+
+          {/* Location Selector Component near search bar */}
+          <div className="max-w-4xl mx-auto mb-4">
+            <LocationSelector />
           </div>
 
           {/* Core Search & Booking Bar */}
@@ -94,7 +136,7 @@ export const LandingPage: React.FC = () => {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search French, Omakase, Italian..."
+                    placeholder="Search Coastal Andhra, French, Omakase..."
                     className="w-full bg-stone-950/80 border border-stone-800 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder-stone-500 focus:outline-none focus:border-amber-500"
                   />
                 </div>
@@ -109,9 +151,9 @@ export const LandingPage: React.FC = () => {
                   <Calendar className="w-4 h-4 text-stone-400 absolute left-3 pointer-events-none" />
                   <input
                     type="date"
-                    value={selectedDate}
+                    value={bookingDate}
                     min={getTodayDateString()}
-                    onChange={(e) => setSelectedDate(e.target.value)}
+                    onChange={(e) => setBookingDate(e.target.value)}
                     className="w-full bg-stone-950/80 border border-stone-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
                   />
                 </div>
@@ -125,8 +167,8 @@ export const LandingPage: React.FC = () => {
                 <div className="relative flex items-center">
                   <Users className="w-4 h-4 text-stone-400 absolute left-3 pointer-events-none" />
                   <select
-                    value={selectedGuests}
-                    onChange={(e) => setSelectedGuests(Number(e.target.value))}
+                    value={bookingPartySize}
+                    onChange={(e) => setBookingPartySize(Number(e.target.value))}
                     className="w-full bg-stone-950/80 border border-stone-800 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 cursor-pointer"
                   >
                     {[1, 2, 3, 4, 5, 6, 7, 8, 10, 12].map((n) => (
@@ -145,7 +187,7 @@ export const LandingPage: React.FC = () => {
                   className="w-full bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-stone-950 font-bold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition-all cursor-pointer hover:scale-[1.02]"
                 >
                   <Search className="w-4 h-4" />
-                  Find Available Tables
+                  Find Tables Nearby
                 </button>
               </div>
             </form>
@@ -194,19 +236,19 @@ export const LandingPage: React.FC = () => {
               Top Curated Culinary Destinations
             </div>
             <h2 className="text-2xl sm:text-3xl font-bold text-white font-display">
-              Featured Partner Restaurants
+              {userLocation ? `Restaurants near ${userLocation.label}` : 'Featured Partner Restaurants'}
             </h2>
           </div>
           <button
             onClick={() => navigate('discovery')}
             className="text-xs font-semibold text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer transition-colors"
           >
-            Explore all {restaurants.length} restaurants <ChevronRight className="w-4 h-4" />
+            Explore all {displayedLocationRestaurants.length} restaurants {userLocation ? `near ${userLocation.label}` : ''} <ChevronRight className="w-4 h-4" />
           </button>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {restaurants.slice(0, 3).map((restaurant) => {
+          {featuredRestaurants.map((restaurant) => {
             const restTables = tables.filter((t) => t.restaurantId === restaurant.id && t.isActive);
             return (
               <div
